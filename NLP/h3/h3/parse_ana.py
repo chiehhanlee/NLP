@@ -1,0 +1,231 @@
+#! /usr/bin/python
+import sys
+import re
+from math import log
+import json
+
+from collections import defaultdict
+from copy import deepcopy , copy
+
+__author__="Chiehhan Lee<chiehhanlee.gmail.com>"
+__date__ ="$April 29, 2013"
+
+MERGE_ALIGN = True
+CALCULATE_T_VAL = False
+#CALCULATE_T_VAL = True
+
+ML_BASED = True
+
+NUM_OF_INTERATION = 5
+IBM_MODEL = 2
+
+NULL_TOKEN = '_NULL_'
+
+def CreateCorpus(eFilename,fFilename):
+    para =[] #Forieng PAragraph
+    with open(eFilename) as eFile:
+        with open(fFilename) as fFile:
+            for eSentence in eFile:
+                eSentence = eSentence.decode('utf8')
+                ewords = eSentence.split(' ')
+                #ewords.insert(0,NULL_TOKEN) 
+                fSentence = fFile.readline()
+                fSentence = fSentence.decode('utf8')
+                fwords = fSentence.split(' ')
+                para.append((ewords,fwords))
+    return para
+
+def Delta(i,j,t,f,e):
+    total =0
+    for idx in xrange(len(e)):
+        total += t(f[i],e[idx])
+    if total == 0:
+        return 0
+    return t(f[i],e[j]) / total
+
+def BuildWordCnt(para):
+    cnt = defaultdict(int)
+    for sentence , dummy in para:
+        for words in sentence:
+            cnt[words] +=1
+    return cnt              
+
+def CalcTVal(eFilename,fFilename):
+    para = CreateCorpus(eFilename,fFilename)
+    cnt = BuildWordCnt(para)
+
+    sys.stderr.write("Init EM Algorithm\n")
+
+    tN = None
+    tM = None
+
+    if IBM_MODEL == 2:
+        tN , tM ,dummy, dummy2 = LoadTVal(sys.argv[3])
+        q = lambda j,i,l,m : float(1) / (l+1)
+        t = lambda f,e : float(tN[e][f])/ tM[e]
+    else:
+        q = lambda j,i,l,m : 1 
+        t = lambda f,e :  float(1) / cnt[e]
+
+    init = False
+    sys.stderr.write("Start EM Algorithm\n")
+
+    for iteridx in xrange(NUM_OF_INTERATION):
+
+        eCnt = defaultdict(int)
+        efCnt = defaultdict(lambda : defaultdict(int))
+        jilmCnt = defaultdict(lambda : defaultdict(lambda : defaultdict(lambda : defaultdict(float))))
+        ilmCnt  = defaultdict(lambda : defaultdict(lambda : defaultdict(float)))
+
+        for sen in para:
+            e , f  = sen
+            m = len(f)
+            l = len(e) #-1
+            for i in xrange(len(f)):
+                total =0
+                if IBM_MODEL==2 and init == True and qM[i][l][m] ==0:
+                     continue
+                for j in xrange(len(e)):
+                    total += q(j,i,l,m)*t(f[i],e[j])
+                if total == 0:
+                    continue
+                for j in xrange(len(e)):
+                    delta = q(j,i,l,m)*t(f[i],e[j]) / total
+
+                    efCnt[e[j]][f[i]] += delta 
+                    eCnt[e[j]] += delta
+                    jilmCnt[j][i][l][m] += delta
+                    ilmCnt[i][l][m] += delta
+
+        if IBM_MODEL == 2:
+            q = lambda j,i,l,m : float(qN[j][i][l][m])/qM[i][l][m]
+
+        t = lambda f,e : float(tN[e][f])/ tM[e]
+
+        tM = eCnt
+        tN = efCnt
+        qN = jilmCnt
+        qM = ilmCnt
+
+        init = True
+        sys.stderr.write("Next Iteration\n")
+
+    print json.dumps(efCnt)
+    print json.dumps(eCnt)
+    print json.dumps(jilmCnt)
+    print json.dumps(ilmCnt)
+
+def LoadTVal(filename):
+    with open(filename,'r') as iFile:
+        efCnt = json.loads(iFile.readline())
+        eCnt = json.loads(iFile.readline())
+        jilmCnt = json.loads(iFile.readline())
+        ilmCnt = json.loads(iFile.readline())
+        return efCnt , eCnt , jilmCnt , ilmCnt
+
+def CalcAlign(eFilename,fFilename,tFilename):
+    sys.stderr.write("Output Alignment\n")
+    para = CreateCorpus(eFilename,fFilename)
+
+    efCnt , eCnt ,jilmCnt, ilmCnt= LoadTVal(tFilename)
+
+    tFunc = lambda f,e : float(efCnt[e][f])/ eCnt[e]
+
+    if IBM_MODEL ==1:
+        qFunc = lambda j,i,l,m : 1 
+    else:
+        qFunc = lambda j,i,l,m : float(jilmCnt[j][i][l][m])/ilmCnt[i][l][m]
+
+    for idxSen in xrange(len(para)):
+        eSen , fSen = para[idxSen]
+        for j in xrange(1,len(eSen)):
+            max = None
+            maxargv = None
+
+            #Order is inverse for maximun likelyhood estimation
+            lidx = str(len(fSen))
+            midx = str(len(eSen))#-1) 
+
+            for i in xrange(len(fSen)):
+
+                #jidx = str(j-1)
+                #iidx = str(i+1)
+
+                if ML_BASED == True:
+                    jidx = str(i)
+                    iidx = str(j)
+                else:
+                    jidx = str(j)
+                    iidx = str(i)
+
+                if IBM_MODEL==1 or( jidx in jilmCnt and iidx in jilmCnt[jidx] and lidx in jilmCnt[jidx][iidx] and midx in jilmCnt[jidx][iidx][lidx]):
+                    if ML_BASED == True:
+                        maxtmp = qFunc(jidx,iidx,lidx,midx)*tFunc(eSen[j],fSen[i]) 
+                    else:
+                        maxtmp = qFunc(jidx,iidx,lidx,midx)*tFunc(fSen[i],eSen[j]) 
+                    if(maxtmp>max):
+                        max = maxtmp
+                        maxargv = i
+            if maxargv != None:
+                #print idxSen+1 , j , maxargv+1 #, lidx , midx
+                print idxSen+1 , j+1 , maxargv+1 #, lidx , midx
+
+def LoadAlgin(filename):
+    with open(filename,'r') as iFile:
+        alignment  = defaultdict(lambda : defaultdict(int))
+        for line in iFile:
+            i, e, f = line.rstrip().split(' ')
+            alignment[int(i)][int(e)]=int(f)
+        return alignment
+
+def MergeAlign(eFilename , fFilename):
+    eAlign = LoadAlgin(eFilename)
+    fAlign = LoadAlgin(fFilename)
+
+    outAlign  = defaultdict(lambda : defaultdict(lambda : defaultdict(int)))
+
+    #Intersection
+    for i in eAlign.keys():
+        for e in eAlign[i].keys():
+            if fAlign[i][eAlign[i][e]]==e:
+                outAlign[i][e]=eAlign[i][e]
+
+    #Grow
+    while(1):
+        done = True
+        for i in eAlign.keys():
+            for e in eAlign[i].keys():
+                if type(outAlign[i][e-1]) != int and eAlign[i][e-1] == eAlign[i][e]:
+                    outAlign[i][e-1] = eAlign[i][e]
+                    done = False
+                if type(outAlign[i][e+1]) != int and eAlign[i][e+1] == eAlign[i][e]:
+                    outAlign[i][e+1] = eAlign[i][e]
+                    done = False
+        if done == True:
+            break
+
+    for i in outAlign.keys():
+        for e in outAlign[i].keys():
+            if type(outAlign[i][e]) == int:
+                print i , e, outAlign[i][e]
+        
+
+if __name__ == "__main__":
+    if MERGE_ALIGN == True: 
+        MergeAlign(sys.argv[1] , sys.argv[2])
+        exit(1)
+
+    if CALCULATE_T_VAL == True:
+        eFilename = sys.argv[1]
+        fFilename = sys.argv[2]
+
+        if ML_BASED == True:
+        #Calcuate Map Based on foriegn file because we want the algin of english sentence
+        #Basied on maximun likelyhood
+            CalcTVal(fFilename,eFilename)
+        else:
+            CalcTVal(eFilename,fFilename)
+    else:
+        eFilename = sys.argv[1]
+        fFilename = sys.argv[2]
+        CalcAlign(eFilename,fFilename,sys.argv[3])
